@@ -1,23 +1,34 @@
 import com.almasb.fxgl.app.GameApplication;
 import com.almasb.fxgl.app.GameSettings;
+import com.almasb.fxgl.core.serialization.Bundle;
 import com.almasb.fxgl.dsl.FXGL;
 import com.almasb.fxgl.entity.Entity;
+import com.almasb.fxgl.entity.SpawnData;
+import com.almasb.fxgl.entity.components.IDComponent;
 import com.almasb.fxgl.input.Input;
 import com.almasb.fxgl.input.UserAction;
+import com.almasb.fxgl.net.Client;
+import com.almasb.fxgl.net.Connection;
+import com.almasb.fxgl.net.Server;
 import com.almasb.fxgl.physics.CollisionHandler;
-import components.BulletComponent;
-import components.ControllableComponent;
-import components.DetailedTypeComponent;
-import components.HealthComponent;
+import components.*;
 import javafx.geometry.Rectangle2D;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Polygon;
+import javafx.scene.text.Text;
+import javafx.util.Duration;
+import network.OperateInfo;
+import network.OperateInfoBuilder;
 import types.BasicEntityTypes;
+import types.NetMsgTypes;
 import util.ComponentUtils;
 
 import java.util.Optional;
+
+import static com.almasb.fxgl.dsl.FXGL.*;
+
 
 public class Main extends GameApplication {
     private static final String GameTitle = "Hulubabies vs Monsters";
@@ -27,6 +38,13 @@ public class Main extends GameApplication {
 
     private Optional<Entity> currentPlayer;
     private Optional<Polygon> playerIcon;
+
+    private boolean isServer;
+    private static final String ip = "localhost";
+    private static final int port = 55555;
+    private Server<Bundle> server;
+    private Client<Bundle> client;
+
 
     @Override
     protected void initSettings(GameSettings gameSettings) {
@@ -40,9 +58,33 @@ public class Main extends GameApplication {
     protected void initGame() {
         FXGL.getGameWorld().addEntityFactory(new HvMFactory());
         FXGL.getGameScene().getViewport().setBounds(0, 0, GameWidth, GameHeight);
-        currentPlayer = Optional.of(FXGL.spawn("TestCharacter1", GameWidth/3, GameHeight/2));
+        currentPlayer = Optional.of(FXGL.spawn("TestCharacter1",
+                new SpawnData(GameWidth/3, GameHeight/2)
+                        .put("name","player1")
+                        .put("id", 111)));
         geneartePlayerIcon(currentPlayer.get());
-        FXGL.spawn("TestCharacter1-Enemy", 2 * GameWidth/3, GameHeight/2);
+        FXGL.spawn("TestCharacter1-Enemy",
+                new SpawnData(GameWidth/2, GameHeight/3)
+                .put("name","player2")
+                .put("id", 222));
+        runOnce(()->{
+            getDialogService().showConfirmationBox("Is Server?", answer -> {
+                isServer = answer;
+                if (isServer) {
+                    server = getNetService().newUDPServer(port);
+                    server.setOnConnected(bundleConnection -> {
+                        bundleConnection.addMessageHandlerFX(this::handleMessage);
+                    });
+                    server.startAsync();
+                } else {
+                    client = getNetService().newUDPClient(ip, port);
+                    client.setOnConnected(bundleConnection -> {
+                        bundleConnection.addMessageHandlerFX(this::handleMessage);
+                    });
+                    client.connectAsync();
+                }
+            });
+        }, Duration.seconds(0.2));
     }
 
     @Override
@@ -52,13 +94,13 @@ public class Main extends GameApplication {
             @Override
             protected void onAction() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).moveUp();
+                    moveFunc(player,"UP");
                 });
             }
             @Override
             protected void onActionEnd() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).stopY();
+                    stopFunc(player);
                 });
             }
         }, KeyCode.UP);
@@ -67,13 +109,14 @@ public class Main extends GameApplication {
             @Override
             protected void onAction() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).moveDown();
+                    moveFunc(player,"DOWN");
                 });
+
             }
             @Override
             protected void onActionEnd() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).stopY();
+                    stopFunc(player);
                 });
             }
         }, KeyCode.DOWN);
@@ -82,13 +125,13 @@ public class Main extends GameApplication {
             @Override
             protected void onAction() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).moveLeft();
+                    moveFunc(player,"LEFT");
                 });
             }
             @Override
             protected void onActionEnd() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).stopX();
+                    stopFunc(player);
                 });
             }
         }, KeyCode.LEFT);
@@ -97,13 +140,13 @@ public class Main extends GameApplication {
             @Override
             protected void onAction() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).moveRight();
+                    moveFunc(player,"RIGHT");
                 });
             }
             @Override
             protected void onActionEnd() {
                 currentPlayer.ifPresent(player -> {
-                    player.getComponent(ControllableComponent.class).stopX();
+                    stopFunc(player);
                 });
             }
         }, KeyCode.RIGHT);
@@ -112,7 +155,8 @@ public class Main extends GameApplication {
             @Override
             protected void onActionBegin() {
                 currentPlayer.ifPresent(player -> {
-                    ComponentUtils.getAttackComponent(player).ifPresent(c -> c.attack());
+//                    ComponentUtils.getAttackComponent(player).ifPresent(AttackComponent::attack);
+                    attackFunc(player);
                 });
             }
         }, KeyCode.A);
@@ -139,6 +183,52 @@ public class Main extends GameApplication {
         }, MouseButton.PRIMARY);
     }
 
+    private void moveFunc(Entity player,String ori) {
+        IDComponent idComponent = player.getComponent(IDComponent.class);
+//        OperateInfo moveinfo = new OperateInfo(idComponent.getName(),idComponent.getId(),player.getX(),player.getY(),ori);
+        OperateInfo moveinfo = new OperateInfoBuilder()
+                .name(idComponent.getName())
+                .id(idComponent.getId())
+                .position(player.getPosition())
+                .ori(ori)
+                .buildOperate();
+        var bundle = new Bundle("");
+        bundle.put("NetMsg",NetMsgTypes.MOVE);
+        bundle.put("operateInfo",moveinfo);
+        if (!isServer){
+            client.broadcast(bundle);
+        }
+    }
+
+    private void attackFunc(Entity player){
+        IDComponent idComponent = player.getComponent(IDComponent.class);
+        System.out.println(idComponent.getName());
+        OperateInfo playInfo = new OperateInfoBuilder()
+                .name(idComponent.getName())
+                .id(idComponent.getId())
+                .buildOperate();
+        var bundle = new Bundle("");
+        bundle.put("NetMsg",NetMsgTypes.ATTACK);
+        bundle.put("operateInfo",playInfo);
+        if(!isServer)
+            client.broadcast(bundle);
+    }
+
+    private void stopFunc(Entity player){
+        IDComponent idComponent = player.getComponent(IDComponent.class);
+//        OperateInfo moveinfo = new OperateInfo(idComponent.getName(),idComponent.getId(),player.getX(),player.getY(),"");
+        OperateInfo stopinfo = new OperateInfoBuilder()
+                .name(idComponent.getName())
+                .id(idComponent.getId())
+                .position(player.getPosition())
+                .buildOperate();
+        var bundle = new Bundle("");
+        bundle.put("NetMsg", NetMsgTypes.STOP);
+        bundle.put("operateInfo",stopinfo);
+        if (!isServer){
+            client.broadcast(bundle);
+        }
+    }
     @Override
     protected void initPhysics() {
         FXGL.getPhysicsWorld().addCollisionHandler(new CollisionHandler(BasicEntityTypes.PLAYER, BasicEntityTypes.PLAYER) {
@@ -156,10 +246,23 @@ public class Main extends GameApplication {
                 var typeB = b.getComponent(DetailedTypeComponent.class);
                 if (typeA.isEnemy(typeB)) {
                     int damage = a.getComponent(BulletComponent.class).getDamage();
-                    b.getComponent(HealthComponent.class).decreaseHealth(damage);
+                    if(isServer) {
+                        IDComponent idComponent = b.getComponent(IDComponent.class);
+                        OperateInfo operateInfo = new OperateInfoBuilder()
+                                .name(idComponent.getName())
+                                .id(idComponent.getId())
+                                .damage(damage)
+                                .buildOperate();
+                        var bundle = new Bundle("");
+                        bundle.put("NetMsg",NetMsgTypes.HIT);
+                        bundle.put("operateInfo",operateInfo);
+                        server.broadcast(bundle);
+                        b.getComponent(HealthComponent.class).decreaseHealth(damage);
+                        checkCurrentPlayerAlive();
+                    }
                     a.removeFromWorld();
-                    checkCurrentPlayerAlive();
                 }
+
             }
         });
     }
@@ -178,6 +281,105 @@ public class Main extends GameApplication {
         icon.setFill(Color.BLUE);
         player.getViewComponent().addChild(icon);
         playerIcon = Optional.of(icon);
+    }
+
+    protected void handleMessage(Connection<Bundle> connection,Bundle bundle){
+        NetMsgTypes nmt = bundle.get("NetMsg");
+        OperateInfo operateInfo = (OperateInfo)bundle.get("operateInfo");
+        String name = operateInfo.name;
+        int id = operateInfo.id;
+        var player = getGameWorld().getEntityByID(name,id);
+        switch (nmt){
+            case MOVE: {
+                if (isServer) {
+                    player.ifPresent(p -> {
+                        String ori = operateInfo.ori;
+                        moveOri(ori, p);
+                        operateInfo.x = p.getX();
+                        operateInfo.y = p.getY();
+                        bundle.put("operateInfo", operateInfo);
+                        server.broadcast(bundle);
+                    });
+                } else {
+                    player.ifPresent(p -> {
+                        double x = operateInfo.x;
+                        double y = operateInfo.y;
+                        String ori = operateInfo.ori;
+                        p.getComponent(ControllableComponent.class).controlOri(ori);
+                        System.out.println(x);
+                        System.out.println(y);
+                        p.setPosition(x,y);
+                    });
+                }
+                break;
+            }
+            case STOP: {
+                if(isServer){
+                    player.ifPresent(p->{
+                        p.getComponent(ControllableComponent.class).stop();
+                        operateInfo.x = p.getX();
+                        operateInfo.y = p.getY();
+                        bundle.put("operateInfo", operateInfo);
+                        server.broadcast(bundle);
+                    });
+                }
+                else{
+                    player.ifPresent(p -> {
+                        double x = operateInfo.x;
+                        double y = operateInfo.y;
+                        p.getComponent(ControllableComponent.class).stop();
+                        p.setPosition(x,y);
+                    });
+                }
+                break;
+            }
+            case ATTACK:{
+                if(isServer){
+                    player.ifPresent(play->{
+                        ComponentUtils.getAttackComponent(play).ifPresent(c->{
+                            c.attack();
+                            server.broadcast(bundle);
+                        });
+                    });
+                }
+                else{
+                    player.ifPresent(play->{
+                        ComponentUtils.getAttackComponent(play).ifPresent(c->{
+                            c.attack();
+//                            server.broadcast(bundle);
+                        });
+                    });
+                }
+                break;
+            }
+            case HIT:{
+                if(!isServer){
+                    int damage = operateInfo.damage;
+                    player.ifPresent(p->{
+                        p.getComponent(HealthComponent.class).decreaseHealth(damage);
+                        checkCurrentPlayerAlive();
+                    });
+                }
+            }
+        }
+
+    }
+
+    private void moveOri(String ori, Entity p) {
+        switch (ori) {
+            case "UP":
+                p.getComponent(ControllableComponent.class).moveUp();
+                break;
+            case "DOWN":
+                p.getComponent(ControllableComponent.class).moveDown();
+                break;
+            case "LEFT":
+                p.getComponent(ControllableComponent.class).moveLeft();
+                break;
+            case "RIGHT":
+                p.getComponent(ControllableComponent.class).moveRight();
+                break;
+        }
     }
 
     public static void main(String[] args) {
